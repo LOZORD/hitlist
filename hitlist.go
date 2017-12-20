@@ -105,30 +105,46 @@ func doMain(sc *sheetsConfig, tc *twitterConfig) error {
 	anaconda.SetConsumerKey(tc.consumerSecret)
 	api := anaconda.NewTwitterApi(tc.accessToken, tc.accessSecret)
 
-	return tweet(api, resp.Values)
+	if err := tweet(api, resp.Values); err != nil {
+		return fmt.Errorf("failed to tweet: %v", err)
+	}
+
+	if err := markComplete(); err != nil {
+		return fmt.Errorf("failed to mark Tweeted data as complete: %v", err)
+	}
+
+	return nil
 }
 
 func getClient(ctx context.Context, config *oauth2.Config) (*http.Client, error) {
-	cacheFile, err := tokenCacheFile()
+	cacheFile, err := createCacheFile()
 	if err != nil {
-		return nil, fmt.Errorf("unable to get path to cached credential file. %v", err)
+		return nil, fmt.Errorf("unable to get path to cached credential file: %v", err)
 	}
+
 	tok, err := tokenFromFile(cacheFile)
 	if err != nil {
-		tok = getTokenFromWeb(config)
+		// The token DNE or is invalid, so fetch and cache a new one.
+		tok, err = getTokenFromWeb(config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get token from web: %v", err)
+		}
 		saveToken(cacheFile, tok)
 	}
+
 	return config.Client(ctx, tok), nil
 }
 
-func tokenCacheFile() (string, error) {
+func createCacheFile() (string, error) {
 	usr, err := user.Current()
 	if err != nil {
 		return "", err
 	}
 	tokenCacheDir := filepath.Join(usr.HomeDir, ".credentials")
-	os.MkdirAll(tokenCacheDir, 0700)
-	return filepath.Join(tokenCacheDir, url.QueryEscape("sheets-to-tweets")), err
+	if err := os.MkdirAll(tokenCacheDir, 0700); err != nil {
+		return "", err
+	}
+	return filepath.Join(tokenCacheDir, url.QueryEscape("sheets-to-tweets")), nil
 }
 
 func tokenFromFile(file string) (*oauth2.Token, error) {
@@ -139,46 +155,52 @@ func tokenFromFile(file string) (*oauth2.Token, error) {
 	defer f.Close()
 
 	t := &oauth2.Token{}
-	err = json.NewDecoder(f).Decode(t)
-	return t, err
+	return t, json.NewDecoder(f).Decode(t)
 }
 
-func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
+func getTokenFromWeb(config *oauth2.Config) (*oauth2.Token, error) {
 	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
-	fmt.Printf("Go to the following link in your browser then type the "+
+	log.Printf("Go to the following link in your browser then type the "+
 		"authorization code: \n%v\n", authURL)
 
 	var code string
 	if _, err := fmt.Scan(&code); err != nil {
-		log.Fatalf("Unable to read authorization code %v", err)
+		return nil, fmt.Errorf("Unable to read authorization code %v", err)
 	}
 
 	tok, err := config.Exchange(oauth2.NoContext, code)
 	if err != nil {
-		log.Fatalf("Unable to retrieve token from web %v", err)
+		return nil, fmt.Errorf("Unable to retrieve token from web %v", err)
 	}
-	return tok
+	return tok, nil
 }
 
-func saveToken(file string, token *oauth2.Token) {
-	fmt.Printf("Saving credential file to: %s\n", file)
+func saveToken(file string, token *oauth2.Token) error {
+	log.Printf("Saving credential file to: %s\n", file)
 	f, err := os.OpenFile(file, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
-		log.Fatalf("Unable to cache oauth token: %v", err)
+		return fmt.Errorf("Unable to cache oauth token: %v", err)
 	}
 	defer f.Close()
-	json.NewEncoder(f).Encode(token)
+	return json.NewEncoder(f).Encode(token)
 }
+
+const maxTweetSize = 280 // wowee!
 
 func tweet(api *anaconda.TwitterApi, data interface{}) error {
 	log.Printf("would have tweeted data: %v", data)
 	status := fmt.Sprintf("some cool data: %v", data)
-	if len(status) > 280 {
-		status = status[:280]
+	if len(status) > maxTweetSize {
+		status = status[:maxTweetSize]
 	}
+
 	if _, err := api.PostTweet(status, url.Values{}); err != nil {
 		return err
 	}
 
+	return nil
+}
+
+func markComplete() error {
 	return nil
 }
